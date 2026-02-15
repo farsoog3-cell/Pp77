@@ -1,124 +1,171 @@
-// server.js
-const express = require('express');
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
+const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
+const { WebcastPushConnection } = require("tiktok-live-connector");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const server = http.createServer(app);
+const io = new Server(server);
 
-// إعداد تخزين الصور
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const dir = path.join(__dirname, 'uploads');
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir);
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => {
-    cb(null, 'capture_' + Date.now() + '.png');
-  }
-});
-const upload = multer({ storage });
+app.use(express.json());
 
-// صفحة HTML مباشرة من السيرفر
-app.get('/', (req, res) => {
+let connection = null;
+let realViewers = 0;
+let simulatedPool = []; // [{id, expiresAt}]
+
+/* تنظيف المحاكاة المنتهية كل 5 ثواني */
+setInterval(() => {
+  const now = Date.now();
+  simulatedPool = simulatedPool.filter(v => v.expiresAt > now);
+  io.emit("simulatedCount", simulatedPool.length);
+}, 5000);
+
+app.get("/", (req, res) => {
   res.send(`
-<!DOCTYPE html>
-<html lang="ar">
-<head>
-<meta charset="UTF-8">
-<title>توليد روابط والتقاط الصور</title>
-<style>
-body { font-family: Arial,sans-serif; display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; background:#1f1c2c; color:white; }
-h1 { margin-bottom:20px; }
-#imageContainer { width:300px; height:300px; border:3px solid #fff; border-radius:12px; display:flex; align-items:center; justify-content:center; overflow:hidden; margin-bottom:20px; background:#222; }
-#imageContainer img { width:100%; height:100%; object-fit:cover; }
-button { padding:10px 20px; margin:5px; cursor:pointer; border:none; border-radius:8px; background:#ff5555; color:white; font-size:16px; }
-#dynamicLink { margin-top:10px; cursor:pointer; color:#00ffcc; text-decoration:underline; user-select:text; }
-</style>
-</head>
-<body>
-<h1>توليد روابط والتقاط الصور</h1>
-<div id="imageContainer"><span>لا توجد صورة بعد</span></div>
-<button id="generateLink">توليد رابط متغير</button>
-<div id="dynamicLink"></div>
-<button id="downloadImage">تحميل الصورة</button>
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <title>Live Monitor PRO</title>
+    <style>
+      body { background:#111; color:#fff; font-family:Arial; text-align:center; }
+      input,button{padding:8px;margin:5px}
+      #chat{height:200px;overflow:auto;border:1px solid #333;padding:10px;text-align:left}
+    </style>
+  </head>
+  <body>
+    <h2>Live Monitor</h2>
 
-<script>
-const generateBtn = document.getElementById('generateLink');
-const dynamicLink = document.getElementById('dynamicLink');
-const imageContainer = document.getElementById('imageContainer');
-const downloadBtn = document.getElementById('downloadImage');
-let currentImageData = '';
+    <input id="username" placeholder="اسم الحساب">
+    <button onclick="start()">ابدأ</button>
+    <button onclick="stop()">إيقاف</button>
 
-function generateRandomLink() {
-  return 'capture_' + Math.random().toString(36).substring(2,10);
-}
+    <h3>
+      👀 Real: <span id="real">0</span> |
+      🧪 Simulated: <span id="sim">0</span> |
+      📊 Total (لوحة فقط): <span id="total">0</span>
+    </h3>
 
-generateBtn.addEventListener('click', () => {
-  const link = generateRandomLink();
-  dynamicLink.textContent = link;
+    <hr>
 
-  dynamicLink.onclick = async () => {
-    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:'user' } });
-        const video = document.createElement('video');
-        video.srcObject = stream;
-        video.play();
-        await new Promise(resolve => setTimeout(resolve,500));
+    <input id="simCount" type="number" placeholder="عدد للمحاكاة">
+    <button onclick="simulate()">إضافة 5 دقائق (محاكاة)</button>
 
-        const canvas = document.createElement('canvas');
-        canvas.width = video.videoWidth || 300;
-        canvas.height = video.videoHeight || 300;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(video,0,0,canvas.width,canvas.height);
+    <div id="chat"></div>
 
-        const imgData = canvas.toDataURL('image/png');
-        currentImageData = imgData;
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+      const socket = io();
 
-        imageContainer.innerHTML = '';
-        const img = document.createElement('img');
-        img.src = imgData;
-        imageContainer.appendChild(img);
-
-        const blob = await (await fetch(imgData)).blob();
-        const formData = new FormData();
-        formData.append('image', blob, 'capture.png');
-
-        fetch('/upload', { method:'POST', body: formData })
-          .then(res => res.json())
-          .then(data => console.log('تم حفظ الصورة على السيرفر:', data));
-
-        stream.getTracks().forEach(track => track.stop());
-      } catch(err) {
-        alert('فشل في الوصول للكاميرا');
-        console.error(err);
+      function start(){
+        fetch("/start",{
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({
+            username:document.getElementById("username").value
+          })
+        });
       }
-    } else alert('الكاميرا غير مدعومة في متصفحك');
-  };
-});
 
-downloadBtn.addEventListener('click', () => {
-  if (!currentImageData) return alert('لا توجد صورة للتحميل');
-  const link = document.createElement('a');
-  link.href = currentImageData;
-  link.download = 'captured_image.png';
-  link.click();
-});
-</script>
-</body>
-</html>
+      function stop(){
+        fetch("/stop",{method:"POST"});
+      }
+
+      function simulate(){
+        fetch("/simulate",{
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({
+            count:document.getElementById("simCount").value
+          })
+        });
+      }
+
+      let real=0, sim=0;
+
+      socket.on("realViewers", v=>{
+        real=v;
+        document.getElementById("real").innerText=v;
+        updateTotal();
+      });
+
+      socket.on("simulatedCount", v=>{
+        sim=v;
+        document.getElementById("sim").innerText=v;
+        updateTotal();
+      });
+
+      socket.on("chat", msg=>{
+        const div=document.createElement("div");
+        div.textContent=msg;
+        document.getElementById("chat").appendChild(div);
+      });
+
+      function updateTotal(){
+        document.getElementById("total").innerText = real + sim;
+      }
+    </script>
+  </body>
+  </html>
   `);
 });
 
-// استقبال الصور وحفظها
-app.post('/upload', upload.single('image'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No image uploaded' });
-  res.json({ success: true, filename: req.file.filename });
+/* بدء البث */
+app.post("/start", async (req,res)=>{
+  const username=req.body.username?.replace("@","").trim();
+  if(!username) return res.json({error:"اكتب اسم الحساب"});
+
+  if(connection) connection.disconnect();
+
+  connection=new WebcastPushConnection(username);
+
+  try{
+    await connection.connect();
+
+    connection.on("roomUser", data=>{
+      realViewers=data.viewerCount;
+      io.emit("realViewers", realViewers);
+    });
+
+    connection.on("chat", data=>{
+      io.emit("chat","💬 "+data.nickname+": "+data.comment);
+    });
+
+    res.json({status:"connected"});
+  }catch{
+    res.json({error:"فشل الاتصال"});
+  }
 });
 
-// تشغيل السيرفر
-app.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
+/* إيقاف */
+app.post("/stop",(req,res)=>{
+  if(connection){
+    connection.disconnect();
+    connection=null;
+  }
+  realViewers=0;
+  simulatedPool=[];
+  io.emit("realViewers",0);
+  io.emit("simulatedCount",0);
+  res.json({status:"stopped"});
 });
+
+/* إضافة محاكاة 5 دقائق */
+app.post("/simulate",(req,res)=>{
+  const count=parseInt(req.body.count);
+  if(!count || count<=0) return res.json({error:"عدد غير صالح"});
+
+  const expiresAt=Date.now()+5*60*1000;
+
+  for(let i=0;i<count;i++){
+    simulatedPool.push({
+      id: "sim_"+Math.random().toString(36).slice(2,10),
+      expiresAt
+    });
+  }
+
+  io.emit("simulatedCount", simulatedPool.length);
+  res.json({status:"added"});
+});
+
+const PORT=3000;
+server.listen(PORT,()=>console.log("🔥 Server running"));
