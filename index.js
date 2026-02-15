@@ -9,163 +9,102 @@ const io = new Server(server);
 
 app.use(express.json());
 
-let connection = null;
-let realViewers = 0;
-let simulatedPool = []; // [{id, expiresAt}]
+/* تخزين كل البثوث */
+const liveRooms = {};
 
-/* تنظيف المحاكاة المنتهية كل 5 ثواني */
-setInterval(() => {
-  const now = Date.now();
-  simulatedPool = simulatedPool.filter(v => v.expiresAt > now);
-  io.emit("simulatedCount", simulatedPool.length);
-}, 5000);
+/* إنشاء بث */
+app.post("/start", async (req, res) => {
+  const username = req.body.username?.replace("@","").trim();
+  if (!username) return res.json({ error: "اكتب اسم الحساب" });
 
-app.get("/", (req, res) => {
-  res.send(`
-  <!DOCTYPE html>
-  <html>
-  <head>
-    <title>Live Monitor PRO</title>
-    <style>
-      body { background:#111; color:#fff; font-family:Arial; text-align:center; }
-      input,button{padding:8px;margin:5px}
-      #chat{height:200px;overflow:auto;border:1px solid #333;padding:10px;text-align:left}
-    </style>
-  </head>
-  <body>
-    <h2>Live Monitor</h2>
+  if (liveRooms[username]) {
+    return res.json({ error: "البث يعمل بالفعل" });
+  }
 
-    <input id="username" placeholder="اسم الحساب">
-    <button onclick="start()">ابدأ</button>
-    <button onclick="stop()">إيقاف</button>
+  const connection = new WebcastPushConnection(username);
 
-    <h3>
-      👀 Real: <span id="real">0</span> |
-      🧪 Simulated: <span id="sim">0</span> |
-      📊 Total (لوحة فقط): <span id="total">0</span>
-    </h3>
+  const stats = {
+    viewers: 0,
+    likes: 0,
+    diamonds: 0,
+    chatCount: 0,
+    gifts: 0,
+    startTime: Date.now()
+  };
 
-    <hr>
-
-    <input id="simCount" type="number" placeholder="عدد للمحاكاة">
-    <button onclick="simulate()">إضافة 5 دقائق (محاكاة)</button>
-
-    <div id="chat"></div>
-
-    <script src="/socket.io/socket.io.js"></script>
-    <script>
-      const socket = io();
-
-      function start(){
-        fetch("/start",{
-          method:"POST",
-          headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({
-            username:document.getElementById("username").value
-          })
-        });
-      }
-
-      function stop(){
-        fetch("/stop",{method:"POST"});
-      }
-
-      function simulate(){
-        fetch("/simulate",{
-          method:"POST",
-          headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({
-            count:document.getElementById("simCount").value
-          })
-        });
-      }
-
-      let real=0, sim=0;
-
-      socket.on("realViewers", v=>{
-        real=v;
-        document.getElementById("real").innerText=v;
-        updateTotal();
-      });
-
-      socket.on("simulatedCount", v=>{
-        sim=v;
-        document.getElementById("sim").innerText=v;
-        updateTotal();
-      });
-
-      socket.on("chat", msg=>{
-        const div=document.createElement("div");
-        div.textContent=msg;
-        document.getElementById("chat").appendChild(div);
-      });
-
-      function updateTotal(){
-        document.getElementById("total").innerText = real + sim;
-      }
-    </script>
-  </body>
-  </html>
-  `);
-});
-
-/* بدء البث */
-app.post("/start", async (req,res)=>{
-  const username=req.body.username?.replace("@","").trim();
-  if(!username) return res.json({error:"اكتب اسم الحساب"});
-
-  if(connection) connection.disconnect();
-
-  connection=new WebcastPushConnection(username);
-
-  try{
+  try {
     await connection.connect();
 
-    connection.on("roomUser", data=>{
-      realViewers=data.viewerCount;
-      io.emit("realViewers", realViewers);
+    liveRooms[username] = { connection, stats };
+
+    /* أحداث البث */
+    connection.on("roomUser", data => {
+      stats.viewers = data.viewerCount;
+      io.to(username).emit("viewers", stats.viewers);
     });
 
-    connection.on("chat", data=>{
-      io.emit("chat","💬 "+data.nickname+": "+data.comment);
+    connection.on("like", data => {
+      stats.likes = data.totalLikeCount;
+      io.to(username).emit("likes", stats.likes);
     });
 
-    res.json({status:"connected"});
-  }catch{
-    res.json({error:"فشل الاتصال"});
+    connection.on("chat", data => {
+      stats.chatCount++;
+      io.to(username).emit("chat", `💬 ${data.nickname}: ${data.comment}`);
+    });
+
+    connection.on("gift", data => {
+      if (data.repeatEnd) {
+        stats.gifts++;
+        stats.diamonds += data.diamondCount || 0;
+        io.to(username).emit("gift",
+          `🎁 ${data.nickname} أرسل ${data.giftName} (${data.diamondCount || 0} 💎)`
+        );
+      }
+    });
+
+    connection.on("disconnected", () => {
+      io.to(username).emit("system", "❌ تم قطع الاتصال");
+    });
+
+    res.json({ status: "connected" });
+
+  } catch (err) {
+    res.json({ error: "فشل الاتصال أو الحساب غير مباشر" });
   }
 });
 
-/* إيقاف */
-app.post("/stop",(req,res)=>{
-  if(connection){
-    connection.disconnect();
-    connection=null;
-  }
-  realViewers=0;
-  simulatedPool=[];
-  io.emit("realViewers",0);
-  io.emit("simulatedCount",0);
-  res.json({status:"stopped"});
-});
-
-/* إضافة محاكاة 5 دقائق */
-app.post("/simulate",(req,res)=>{
-  const count=parseInt(req.body.count);
-  if(!count || count<=0) return res.json({error:"عدد غير صالح"});
-
-  const expiresAt=Date.now()+5*60*1000;
-
-  for(let i=0;i<count;i++){
-    simulatedPool.push({
-      id: "sim_"+Math.random().toString(36).slice(2,10),
-      expiresAt
-    });
+/* إيقاف بث */
+app.post("/stop", (req, res) => {
+  const username = req.body.username;
+  if (!liveRooms[username]) {
+    return res.json({ error: "لا يوجد بث بهذا الاسم" });
   }
 
-  io.emit("simulatedCount", simulatedPool.length);
-  res.json({status:"added"});
+  liveRooms[username].connection.disconnect();
+  delete liveRooms[username];
+
+  io.to(username).emit("system", "⛔ تم إيقاف البث");
+
+  res.json({ status: "stopped" });
 });
 
-const PORT=3000;
-server.listen(PORT,()=>console.log("🔥 Server running"));
+/* API للإحصائيات */
+app.get("/stats/:username", (req, res) => {
+  const room = liveRooms[req.params.username];
+  if (!room) return res.json({ error: "غير متصل" });
+
+  res.json(room.stats);
+});
+
+/* WebSocket */
+io.on("connection", socket => {
+  socket.on("join", username => {
+    socket.join(username);
+  });
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log("🔥 PRO Server running on port " + PORT);
+});
