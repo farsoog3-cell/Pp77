@@ -1,151 +1,63 @@
 const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
 const { WebcastPushConnection } = require("tiktok-live-connector");
 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
+
 app.use(express.json());
 
 let connection = null;
-let viewers = 0;
-let messages = [];
-let intervalId = null;
 
-app.get("/", (req, res) => {
-  res.send(`
-  <!DOCTYPE html>
-  <html>
-  <head>
-    <title>TikTok Live Monitor</title>
-    <style>
-      body { background:#111; color:#fff; font-family:Arial; text-align:center; }
-      input, button { padding:10px; margin:5px; }
-      button { cursor:pointer; }
-      #status { margin-top:15px; font-weight:bold; }
-      #chat { margin-top:20px; height:300px; overflow:auto; border:1px solid #444; padding:10px; text-align:left; }
-    </style>
-  </head>
-  <body>
-    <h2>مراقبة بث TikTok</h2>
+io.on("connection", (socket) => {
+  console.log("User connected");
 
-    <input id="username" placeholder="اكتب اسم الحساب فقط">
-    <button onclick="start()">ابدأ</button>
-    <button onclick="stop()">إيقاف البث</button>
+  socket.on("start", async (username) => {
+    if (!username) {
+      return socket.emit("errorMessage", "❌ أدخل اسم الحساب");
+    }
 
-    <div id="status"></div>
-    <div id="chat"></div>
+    try {
+      if (connection) connection.disconnect();
 
-    <script>
-      let fetchInterval = null;
+      connection = new WebcastPushConnection(username);
+      await connection.connect();
 
-      function start() {
-        const username = document.getElementById("username").value;
-        if(!username){
-          document.getElementById("status").innerText = "❌ أدخل اسم الحساب";
-          return;
-        }
+      socket.emit("status", "✅ متصل بالبث");
 
-        document.getElementById("status").innerText = "⏳ جاري الاتصال...";
+      connection.on("roomUser", data => {
+        socket.emit("viewers", data.viewerCount);
+      });
 
-        fetch("/start", {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({ username })
-        })
-        .then(res => res.json())
-        .then(data => {
-          if(data.error){
-            document.getElementById("status").innerText = data.error;
-          } else {
-            document.getElementById("status").innerText = "✅ متصل بالبث";
-
-            if(fetchInterval) clearInterval(fetchInterval);
-
-            fetchInterval = setInterval(() => {
-              fetch("/data")
-              .then(res => res.json())
-              .then(data => {
-                document.getElementById("status").innerText =
-                  "👀 المشاهدين الآن: " + data.viewers;
-
-                const chat = document.getElementById("chat");
-                chat.innerHTML = "";
-                data.messages.forEach(msg => {
-                  chat.innerHTML += msg + "<br>";
-                });
-                chat.scrollTop = chat.scrollHeight;
-              });
-            }, 2000);
-          }
+      connection.on("chat", data => {
+        socket.emit("chat", {
+          nickname: data.nickname,
+          comment: data.comment
         });
-      }
+      });
 
-      function stop() {
-        fetch("/stop", { method: "POST" })
-        .then(res => res.json())
-        .then(() => {
-          document.getElementById("status").innerText = "⛔ تم إيقاف البث";
-          document.getElementById("chat").innerHTML = "";
-          if(fetchInterval) clearInterval(fetchInterval);
-        });
-      }
-    </script>
-  </body>
-  </html>
-  `);
-});
+    } catch (err) {
+      socket.emit("errorMessage", "❌ الحساب غير مباشر أو فشل الاتصال");
+    }
+  });
 
-app.post("/start", async (req, res) => {
-  const username = req.body.username;
+  socket.on("stop", () => {
+    if (connection) {
+      connection.disconnect();
+      connection = null;
+    }
+    socket.emit("status", "⛔ تم الإيقاف");
+  });
 
-  if (!username) {
-    return res.json({ error: "❌ أدخل اسم الحساب" });
-  }
-
-  if (connection) {
-    connection.disconnect();
-  }
-
-  viewers = 0;
-  messages = [];
-
-  connection = new WebcastPushConnection(username);
-
-  try {
-    await connection.connect();
-
-    connection.on("roomUser", data => {
-      viewers = data.viewerCount;
-    });
-
-    connection.on("chat", data => {
-      messages.push("💬 " + data.nickname + ": " + data.comment);
-      if (messages.length > 50) messages.shift();
-    });
-
-    res.json({ status: "connected" });
-
-  } catch (err) {
-    res.json({ error: "❌ الحساب غير مباشر أو فشل الاتصال" });
-  }
-});
-
-app.post("/stop", (req, res) => {
-  if (connection) {
-    connection.disconnect();
-    connection = null;
-  }
-
-  viewers = 0;
-  messages = [];
-
-  res.json({ status: "stopped" });
-});
-
-app.get("/data", (req, res) => {
-  res.json({
-    viewers,
-    messages
+  socket.on("disconnect", () => {
+    if (connection) {
+      connection.disconnect();
+      connection = null;
+    }
+    console.log("User disconnected");
   });
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Server running"));
+server.listen(3000, () => console.log("Server running"));
